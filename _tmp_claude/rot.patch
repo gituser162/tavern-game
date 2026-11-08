@@ -1,0 +1,315 @@
+diff -ru a/scripts/game_state.gd b/scripts/game_state.gd
+--- a/scripts/game_state.gd	2026-11-07 20:56:46.857548836 +0000
++++ b/scripts/game_state.gd	2026-11-07 20:56:46.859465225 +0000
+@@ -296,8 +296,8 @@
+ 
+ 
+ ## The keeper moves a piece on a shelf (puzzle storage). Returns false if it does not fit there.
+-func move_piece(place_id: String, uid: int, level: int, x: int, y: int) -> bool:
+-	if not storage.move(place_id, uid, level, x, y):
++func move_piece(place_id: String, uid: int, level: int, x: int, y: int, turned: bool = false) -> bool:
++	if not storage.move(place_id, uid, level, x, y, turned):
+ 		return false
+ 	changed.emit()
+ 	return true
+diff -ru a/scripts/main.gd b/scripts/main.gd
+--- a/scripts/main.gd	2026-11-07 20:56:46.860909117 +0000
++++ b/scripts/main.gd	2026-11-07 20:56:46.862499916 +0000
+@@ -101,11 +101,13 @@
+ var _open_storage: String = ""
+ ## Stock drawn on the shelves (see ShelfLayout): place id -> {piece uid: TextureRect}.
+ var _shelf_nodes: Dictionary = {}
+-## item id -> its unlit sprite; light of the background for the shelf shader.
++## item id -> its unlit sprite (and the same turned by 90 degrees); light of the background for the shelf shader.
+ var _shelf_textures: Dictionary = {}
++var _shelf_textures_turned: Dictionary = {}
+ var _shelf_light: Texture2D
+ var _shelf_shader: Shader
+-## Piece being dragged: {"place", "uid", "id", "node", "grab" (mouse offset), "from" (screen pos), "moved", "target"}.
++## Piece being dragged: {"place", "uid", "id", "node", "grab" (mouse offset), "from" (screen pos), "moved", "target",
++## "r" (turned now), "r0" (turned when picked up)}.
+ var _drag: Dictionary = {}
+ var _shelf_overlay: ShelfOverlay
+ ## The storage changed and the shelves still show the old stock (they are updated while the room is in view).
+@@ -542,7 +544,7 @@
+ 	close.focus_mode = Control.FOCUS_NONE
+ 	close.pressed.connect(_close_storage)
+ 	header.add_child(close)
+-	var hint := "  Перетягуй речі мишкою прямо на полиці, щоб умістити більше." if ShelfLayout.ORIGINS.has(place_id) else ""
++	var hint := "  Перетягуй речі мишкою прямо на полиці, щоб умістити більше. Права кнопка (або R чи коліщатко під час перетягування) повертає річ." if ShelfLayout.ORIGINS.has(place_id) else ""
+ 	var desc := _label(GameData.STORAGES[place_id].get("desc", "") + hint, 13, MUTED)
+ 	desc.custom_minimum_size = Vector2(340, 0)
+ 	box.add_child(desc)
+@@ -640,7 +642,11 @@
+ 	if atlas != null:
+ 		var img := atlas.get_image()
+ 		for id in ShelfLayout.SPRITES:
+-			_shelf_textures[id] = ImageTexture.create_from_image(img.get_region(ShelfLayout.SPRITES[id]))
++			var region := img.get_region(ShelfLayout.SPRITES[id])
++			_shelf_textures[id] = ImageTexture.create_from_image(region)
++			var turned := region.duplicate()
++			turned.rotate_90(CLOCKWISE)
++			_shelf_textures_turned[id] = ImageTexture.create_from_image(turned)
+ 	for place_id in ShelfLayout.ORIGINS:
+ 		_shelf_nodes[place_id] = {}
+ 	_shelf_overlay = ShelfOverlay.new()
+@@ -665,9 +671,22 @@
+ 	return Vector2(o + Vector2i(p["x"], p["y"]) * ShelfLayout.CELL)
+ 
+ 
++func _piece_texture(id: String, turned: bool) -> Texture2D:
++	return (_shelf_textures_turned if turned else _shelf_textures).get(id)
++
++
++## Shows a piece standing or lying on its side.
++func _turn_piece_node(t: TextureRect, id: String, turned: bool) -> void:
++	t.set_meta("r", turned)
++	t.texture = _piece_texture(id, turned)
++	if t.texture != null:
++		t.size = t.texture.get_size() * _bg_scale()
++
++
+ func _make_piece(place_id: String, p: Dictionary) -> TextureRect:
+ 	var t := TextureRect.new()
+-	t.texture = _shelf_textures.get(p["id"])
++	t.set_meta("r", p.get("r", false))
++	t.texture = _piece_texture(p["id"], p.get("r", false))
+ 	t.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+ 	t.stretch_mode = TextureRect.STRETCH_SCALE
+ 	t.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+@@ -732,6 +751,8 @@
+ 					arrivals += 1
+ 				continue
+ 			var node: TextureRect = nodes[uid]
++			if node.get_meta("r", false) != p.get("r", false):
++				_turn_piece_node(node, p["id"], p.get("r", false))
+ 			var rest := (dest - Vector2(STORAGE_RECTS[place_id].position)) * k
+ 			if node.position.distance_to(rest) > 0.5:
+ 				if animate:
+@@ -791,12 +812,66 @@
+ # --- dragging pieces ---
+ 
+ func _on_piece_input(event: InputEvent, place_id: String, uid: int, id: String, t: TextureRect) -> void:
+-	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed and _drag.is_empty():
+-		if _shelves_covered():
+-			return
++	if not (event is InputEventMouseButton and event.pressed and _drag.is_empty()) or _shelves_covered():
++		return
++	if event.button_index == MOUSE_BUTTON_LEFT:
++		var r: bool = t.get_meta("r", false)
+ 		_drag = {"place": place_id, "uid": uid, "id": id, "node": t, "grab": event.global_position - t.global_position,
+-			"from": event.global_position, "start": t.position, "moved": false, "target": {}}
++			"from": event.global_position, "start": t.position, "moved": false, "target": {}, "r": r, "r0": r}
+ 		t.accept_event()
++	elif event.button_index == MOUSE_BUTTON_RIGHT:
++		t.accept_event()
++		_turn_in_place(place_id, uid, id)
++
++
++## Right click on a piece lying on a shelf: turn it where it lies, or in the nearest free spot next to it.
++func _turn_in_place(place_id: String, uid: int, id: String) -> void:
++	var list := GameState.storage.pieces(place_id)
++	var index := -1
++	for i in list.size():
++		if list[i]["uid"] == uid:
++			index = i
++	if index < 0:
++		return
++	var p: Dictionary = list[index]
++	var turned: bool = not p.get("r", false)
++	var before := Storage.piece_size(p)
++	var after := Storage.size_of(id, turned)
++	if before == after:
++		return
++	var g := Storage.grid_of(place_id)
++	# Keep the bottom-left corner if possible (things stand on the shelf), else the closest spot within 2 cells.
++	var anchor := Vector2(p["x"], p["y"] + before.y - after.y)
++	var best := Vector2i(-1, -1)
++	var best_d := 2.5
++	for y in g["rows"] - after.y + 1:
++		for x in g["cols"] - after.x + 1:
++			var d := anchor.distance_to(Vector2(x, y))
++			if d < best_d and Storage.fits(place_id, list, id, p["s"], x, y, index, turned):
++				best_d = d
++				best = Vector2i(x, y)
++	if best.x >= 0 and GameState.move_piece(place_id, uid, p["s"], best.x, best.y, turned):
++		Audio.play("shelf")
++	else:
++		Audio.play("error")
++
++
++## While dragging: right click, R or the mouse wheel turns the piece by 90 degrees around the mouse.
++func _turn_dragged() -> void:
++	var t: TextureRect = _drag["node"]
++	var r: bool = not _drag["r"]
++	var mouse: Vector2 = t.global_position + _drag["grab"]
++	var rel: Vector2 = _drag["grab"] / t.size if t.size.x > 0 and t.size.y > 0 else Vector2(0.5, 0.5)
++	_drag["r"] = r
++	_turn_piece_node(t, _drag["id"], r)
++	_drag["grab"] = Vector2(rel.y, rel.x) * t.size
++	t.global_position = mouse - _drag["grab"]
++	if not _drag["moved"]:
++		_drag["moved"] = true
++		t.z_index = 26
++		_tip.visible = false
++	Audio.play("click")
++	_update_drag_target()
+ 
+ 
+ func _input(event: InputEvent) -> void:
+@@ -806,6 +881,13 @@
+ 	if not is_instance_valid(t):
+ 		_drag = {}
+ 		return
++	var turn_key: bool = event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_R
++	var turn_mouse: bool = event is InputEventMouseButton and event.pressed and event.button_index in [MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]
++	if turn_key or turn_mouse:
++		get_viewport().set_input_as_handled()
++		if Storage.size_of(_drag["id"]) != Storage.size_of(_drag["id"], true):
++			_turn_dragged()
++		return
+ 	if event is InputEventMouseMotion:
+ 		if not _drag["moved"] and event.global_position.distance_to(_drag["from"]) > 6.0:
+ 			_drag["moved"] = true
+@@ -826,11 +908,14 @@
+ 		var target: Dictionary = _drag["target"]
+ 		var uid: int = _drag["uid"]
+ 		_end_drag_visuals()
+-		if not target.is_empty() and target["ok"] and GameState.move_piece(place_id, uid, target["s"], target["x"], target["y"]):
++		var turned: bool = _drag["r"]
++		if not target.is_empty() and target["ok"] and GameState.move_piece(place_id, uid, target["s"], target["x"], target["y"], turned):
+ 			Audio.play("shelf")
+ 		else:
+ 			if not target.is_empty():
+ 				Audio.play("error")
++			if turned != _drag["r0"]:
++				_turn_piece_node(t, _drag["id"], _drag["r0"])
+ 			var tw := create_tween()
+ 			tw.tween_property(t, "position", _drag_start_pos, 0.2).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+ 		_drag = {}
+@@ -851,6 +936,8 @@
+ func _cancel_drag() -> void:
+ 	if is_instance_valid(_drag.get("node")):
+ 		_end_drag_visuals()
++		if _drag["r"] != _drag["r0"]:
++			_turn_piece_node(_drag["node"], _drag["id"], _drag["r0"])
+ 		_drag["node"].position = _drag["start"]
+ 	_drag = {}
+ 
+@@ -862,7 +949,7 @@
+ 	var k := _bg_scale()
+ 	var cell := float(ShelfLayout.CELL)
+ 	var g := Storage.grid_of(place_id)
+-	var sz := GameData.item_size(_drag["id"])
++	var sz := Storage.size_of(_drag["id"], _drag["r"])
+ 	var top_left := (t.global_position - _bg_to_screen(Rect2(0, 0, 1, 1)).position) / k   # bg px
+ 	var centre := top_left + Vector2(sz) * cell / 2.0
+ 	var best := {}
+@@ -883,7 +970,7 @@
+ 	for i in list.size():
+ 		if list[i]["uid"] == _drag["uid"]:
+ 			index = i
+-	best["ok"] = best_d < cell * 2.0 and Storage.fits(place_id, list, _drag["id"], best["s"], best["x"], best["y"], index)
++	best["ok"] = best_d < cell * 2.0 and Storage.fits(place_id, list, _drag["id"], best["s"], best["x"], best["y"], index, _drag["r"])
+ 	_drag["target"] = best
+ 	var o2 := Vector2(ShelfLayout.ORIGINS[place_id][best["s"]])
+ 	_shelf_overlay.grids = grids
+diff -ru a/scripts/storage.gd b/scripts/storage.gd
+--- a/scripts/storage.gd	2026-11-07 20:56:46.854486516 +0000
++++ b/scripts/storage.gd	2026-11-07 20:56:46.856015763 +0000
+@@ -2,12 +2,13 @@
+ ## The tavern storage: several separate places (shelves for food, drinks, potions, gear; the attic), see GameData.STORAGES.
+ ## Every place is a grid of cells: `surfaces` levels (the middle shelf and the floor plank), each `cols` x `rows`.
+ ## Every item has a shape (GameData.item_size, w x h cells) and takes those cells; items never overlap.
++## A piece can be turned by 90 degrees ("r": true), then it takes h x w cells.
+ ## Counts {item id: n} are kept for the rest of the game; `layout` says where every piece lies.
+ 
+ const GameData := preload("res://scripts/game_data.gd")
+ 
+ var items: Dictionary = {}
+-## place id -> Array of pieces {"id": item id, "uid": unique number, "s": surface, "x": column, "y": row (0 = top)}.
++## place id -> Array of pieces {"id": item id, "uid": unique number, "s": surface, "x": column, "y": row (0 = top), "r": turned}.
+ var layout: Dictionary = {}
+ var _next_uid := 1
+ 
+@@ -37,6 +38,16 @@
+ 	return layout[place_id]
+ 
+ 
++## Cells a piece takes (w x h), turned or not.
++static func size_of(item_id: String, turned: bool = false) -> Vector2i:
++	var sz := GameData.item_size(item_id)
++	return Vector2i(sz.y, sz.x) if turned else sz
++
++
++static func piece_size(p: Dictionary) -> Vector2i:
++	return size_of(p["id"], p.get("r", false))
++
++
+ ## Cells taken in this place.
+ func used(place_id: String) -> int:
+ 	var n := 0
+@@ -57,9 +68,9 @@
+ 
+ 
+ ## True if an item of this shape can lie at (s, x, y) among `list` (piece number `ignore` does not count).
+-static func fits(place_id: String, list: Array, item_id: String, s: int, x: int, y: int, ignore: int = -1) -> bool:
++static func fits(place_id: String, list: Array, item_id: String, s: int, x: int, y: int, ignore: int = -1, turned: bool = false) -> bool:
+ 	var g := grid_of(place_id)
+-	var sz := GameData.item_size(item_id)
++	var sz := size_of(item_id, turned)
+ 	if s < 0 or s >= g["surfaces"] or x < 0 or y < 0 or x + sz.x > g["cols"] or y + sz.y > g["rows"]:
+ 		return false
+ 	for i in list.size():
+@@ -68,21 +79,24 @@
+ 		var p: Dictionary = list[i]
+ 		if p["s"] != s:
+ 			continue
+-		var psz := GameData.item_size(p["id"])
++		var psz := piece_size(p)
+ 		if x < p["x"] + psz.x and p["x"] < x + sz.x and y < p["y"] + psz.y and p["y"] < y + sz.y:
+ 			return false
+ 	return true
+ 
+ 
+ ## First free spot for this item: upper shelf first, from the bottom row up (things stand on the shelf), left to right.
++## Standing up is tried first; only if there is no room the item is laid on its side.
+ static func find_spot(place_id: String, list: Array, item_id: String) -> Dictionary:
+ 	var g := grid_of(place_id)
+-	var sz := GameData.item_size(item_id)
+-	for s in g["surfaces"]:
+-		for y in range(g["rows"] - sz.y, -1, -1):
+-			for x in g["cols"] - sz.x + 1:
+-				if fits(place_id, list, item_id, s, x, y):
+-					return {"id": item_id, "s": s, "x": x, "y": y}
++	var base := GameData.item_size(item_id)
++	for turned in ([false, true] if base.x != base.y else [false]):
++		var sz := size_of(item_id, turned)
++		for s in g["surfaces"]:
++			for y in range(g["rows"] - sz.y, -1, -1):
++				for x in g["cols"] - sz.x + 1:
++					if fits(place_id, list, item_id, s, x, y, -1, turned):
++						return {"id": item_id, "s": s, "x": x, "y": y, "r": turned}
+ 	return {}
+ 
+ 
+@@ -187,15 +201,16 @@
+ 	return true
+ 
+ 
+-## Moves the piece with this uid to (s, x, y). Returns false if it does not fit there.
+-func move(place_id: String, uid: int, s: int, x: int, y: int) -> bool:
++## Moves the piece with this uid to (s, x, y), turned or not. Returns false if it does not fit there.
++func move(place_id: String, uid: int, s: int, x: int, y: int, turned: bool = false) -> bool:
+ 	var list := pieces(place_id)
+ 	var index := -1
+ 	for i in list.size():
+ 		if list[i]["uid"] == uid:
+ 			index = i
+-	if index < 0 or not fits(place_id, list, list[index]["id"], s, x, y, index):
++	if index < 0 or not fits(place_id, list, list[index]["id"], s, x, y, index, turned):
+ 		return false
++	list[index]["r"] = turned
+ 	list[index]["s"] = s
+ 	list[index]["x"] = x
+ 	list[index]["y"] = y
