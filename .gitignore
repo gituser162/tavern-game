@@ -1,3 +1,15 @@
+# Godot 4
 .godot/
-*.import
+/android/
 export_presets.cfg
+
+# Бекапи та тимчасові файли Claude
+_tmp_claude/
+
+# Python
+__pycache__/
+*.pyc
+
+# Сирі паки асетів і референси (не використовуються грою)
+assets/*.zip
+assets/*.jfif
