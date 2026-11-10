@@ -4,6 +4,8 @@ extends Control
 ## Shows itself while GameState.trip is not empty. Call refresh() whenever the game state changes.
 
 const GameData := preload("res://scripts/game_data.gd")
+const FishingGame := preload("res://scripts/fishing_game.gd")
+const Wallet := preload("res://scripts/wallet.gd")
 
 const BG_SIZE := Vector2(320, 180)
 ## Size of a resource on the location, in background pixels.
@@ -11,6 +13,8 @@ const NODE_SIZE := 14.0
 const GOLD := Color("f2c14e")
 const TEXT := Color("eadbc8")
 const MUTED := Color("b8a48c")
+## Names of the people at the port (LOCATIONS["port"]["people"]).
+const PEOPLE := {"merchant": "Заморський купець", "smuggler": "Контрабандист"}
 
 var _bg: TextureRect
 var _field: Control
@@ -34,6 +38,19 @@ var _shown_nodes: Array = []
 var _message: String = ""
 var _time: float = 0.0
 var _drops: Array[Vector3] = []
+## Lake: the pier where the rod is cast and the fishing mini-game.
+var _pier_button: Button
+var _fishing: FishingGame
+## Swamp: the will-o'-wisp (bg pixels) and the button that follows it.
+var _wisp_button: Button
+var _wisp_pos := Vector2(-100, -100)
+## Port: buttons over the merchant and the smuggler, the deal window.
+var _people_buttons: Dictionary = {}
+var _port_panel: PanelContainer
+var _port_box: VBoxContainer
+var _port_who: String = ""
+## What the cursor is on: "pier", "merchant", "smuggler", "wisp" or "".
+var _hover: String = ""
 
 
 func _ready() -> void:
@@ -149,6 +166,47 @@ func _ready() -> void:
 	_grave_button.pressed.connect(_show_grave_question)
 	_field.add_child(_grave_button)
 
+	_pier_button = _spot_button("pier")
+	_pier_button.pressed.connect(_open_fishing)
+	_wisp_button = _spot_button("wisp")
+	_wisp_button.tooltip_text = "Блукаючий вогник\nНатисни, щоб спробувати впіймати його в банку.\nАбо він заведе тебе в трясовину..."
+	_wisp_button.pressed.connect(_on_wisp_pressed)
+	for who in PEOPLE:
+		var b := _spot_button(who)
+		b.pressed.connect(_open_port.bind(who))
+		_people_buttons[who] = b
+	_build_port_panel(center)
+	# The fishing window covers everything (added last).
+	_fishing = FishingGame.new()
+	_fishing.closed.connect(refresh)
+	add_child(_fishing)
+
+
+## A flat clickable area over something drawn on the background (no look of its own).
+func _spot_button(id: String) -> Button:
+	var b := Button.new()
+	b.flat = true
+	b.focus_mode = Control.FOCUS_NONE
+	b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	for st in ["normal", "hover", "pressed", "hover_pressed", "disabled"]:
+		b.add_theme_stylebox_override(st, StyleBoxEmpty.new())
+	b.mouse_entered.connect(func(): _hover = id)
+	b.mouse_exited.connect(func(): if _hover == id: _hover = "")
+	b.visible = false
+	_field.add_child(b)
+	return b
+
+
+func _build_port_panel(parent: Control) -> void:
+	_port_panel = PanelContainer.new()
+	_port_panel.custom_minimum_size = Vector2(560, 0)
+	_port_panel.add_theme_stylebox_override("panel", _style(Color(0.15, 0.1, 0.07, 0.97), 10))
+	_port_panel.visible = false
+	parent.add_child(_port_panel)
+	_port_box = VBoxContainer.new()
+	_port_box.add_theme_constant_override("separation", 8)
+	_port_panel.add_child(_port_box)
+
 
 func _style(color: Color, radius: int) -> StyleBoxFlat:
 	var sb := StyleBoxFlat.new()
@@ -173,26 +231,42 @@ func refresh() -> void:
 		if trip["nodes"][i]["taken"] and not _buttons[i].disabled:
 			_buttons[i].hide()  # taken without a click (nothing to animate)
 	_grave_button.visible = trip.get("grave", "") == "closed" and not _event_panel.visible
+	_pier_button.visible = loc.has("fishing") and not _event_panel.visible and not _expelled()
+	_pier_button.tooltip_text = "Поміст: закинути вудку\nЗакидів лишилось: %d" % GameState.fishing_casts_left()
+	_wisp_button.visible = trip.get("wisp", "") == "free" and not _event_panel.visible
+	var is_port: bool = loc.get("kind", "") == "port"
+	for who in _people_buttons:
+		_people_buttons[who].visible = is_port and not _event_panel.visible and not _port_panel.visible
+		_people_buttons[who].tooltip_text = _person_tooltip(who)
+	if _port_panel.visible:
+		_fill_port_panel()
 	_title.text = loc["name"]
 	var parts: PackedStringArray = []
 	var found: Dictionary = trip["found"]
-	parts.append("[color=#b8a48c]Зібрано:[/color] " + (_counts_bbcode(found) if not found.is_empty() else "нічого"))
+	if is_port:
+		parts.append("[color=#b8a48c]Золото:[/color] " + Wallet.format_amount(GameState.wallet.total, true))
+		parts.append("[color=#b8a48c]Підозра:[/color] %d" % GameState.suspicion)
+	else:
+		parts.append("[color=#b8a48c]Зібрано:[/color] " + (_counts_bbcode(found) if not found.is_empty() else "нічого"))
+	if loc.has("fishing"):
+		parts.append("[color=#b8a48c]Закидів:[/color] %d" % GameState.fishing_casts_left())
 	var left := 0
 	for node in trip["nodes"]:
 		if not node["taken"] and not node.get("gone", false):
 			left += 1
 	if not trip["nodes"].is_empty():
 		parts.append("[color=#b8a48c]Лишилось:[/color] %d" % left)
-	var places := {}
-	for node in trip["nodes"]:
-		places[GameState.storage.place_of(node["item"])] = true
-	for place_id in places:
-		parts.append("[color=#b8a48c]%s:[/color] %d / %d" % [GameData.STORAGES[place_id]["name"], GameState.storage.used(place_id), GameState.storage.capacity(place_id)])
+	if not trip["nodes"].is_empty():
+		parts.append("[color=#b8a48c]Місце в таверні:[/color] %d / %d" % [GameState.storage.used_total(), GameState.storage.capacity_total()])
 	if _message != "":
 		parts.append("[color=#e08a7a]%s[/color]" % _message)
 	_status.text = "     ".join(parts)
-	if _expelled():
+	if _expelled() or trip.get("wisp", "") == "sunk":
 		_hint.text = "Похід зірвано. Повертайся в таверну."
+	elif is_port:
+		_hint.text = "Натисни на купця під навісом або на постать у темній арці складу."
+	elif trip.get("wisp", "") == "free":
+		_hint.text = "Над болотом пливе блукаючий вогник. Натисни на нього, якщо наважишся (краще спершу зібрати, що лежить)."
 	elif _timer_running and _timed_left() > 0:
 		_hint.text = "Світні гриби згаснуть за %d с! Збирай їх першими." % ceili(_timer_left)
 	elif _is_foggy() and left > 0:
@@ -200,7 +274,9 @@ func refresh() -> void:
 	elif trip.get("grave", "") == "closed":
 		_hint.text = "Натисни на розкопану могилу, щоб обшукати її. Або просто збирай ресурси."
 	elif left > 0:
-		_hint.text = "Натисни на ресурс, щоб зібрати його. Що не збереш, залишиться тут."
+		_hint.text = "Натисни на ресурс, щоб зібрати його. Що не збереш, залишиться тут." + (" Із помосту можна порибалити." if loc.has("fishing") else "")
+	elif loc.has("fishing") and GameState.fishing_casts_left() > 0:
+		_hint.text = "На березі все зібрано. Натисни на поміст, щоб закинути вудку."
 	else:
 		_hint.text = "Тут більше нічого немає. Можна повертатися в таверну."
 
@@ -237,9 +313,12 @@ func _start_trip(trip: Dictionary, loc: Dictionary) -> void:
 	if not event.is_empty():
 		_event_title.text = event["name"]
 		_event_text.text = trip.get("event_text", event["text"])
-		_event_button.text = "Тікати в таверну" if _expelled() else "Збирати!"
+		_event_button.text = "Тікати в таверну" if _expelled() else ("Зрозуміло" if loc.get("kind", "") == "port" else "Збирати!")
 		if trip.get("grave", "") == "closed":
 			_show_grave_question()
+	_port_panel.visible = false
+	_port_who = ""
+	_hover = ""
 	_drops.clear()
 	if _is_raining():
 		for i in 140:
@@ -273,6 +352,17 @@ func _layout_nodes() -> void:
 		# The spot is where the resource touches the ground (bottom centre).
 		b.position = _to_screen(nodes[i]["spot"]) - Vector2(s / 2.0, s * 0.9)
 		b.visible = not nodes[i]["taken"] and not nodes[i].get("gone", false)
+	var gs0 := _bg_scale()
+	var loc: Dictionary = GameData.LOCATIONS[GameState.trip["location"]]
+	if loc.has("fishing"):
+		var f := Vector2(loc["fishing"][0], loc["fishing"][1])
+		_pier_button.position = _to_screen(f - Vector2(22, 26))
+		_pier_button.size = Vector2(44, 40) * gs0
+	for who in _people_buttons:
+		var r: Array = loc.get("people", {}).get(who, [0, 0, 0, 0])
+		_people_buttons[who].position = _to_screen(Vector2(r[0], r[1]))
+		_people_buttons[who].size = Vector2(r[2], r[3]) * gs0
+	_wisp_button.size = Vector2(18, 18) * gs0
 	var grave := _grave_spot()
 	if grave != Vector2.INF:
 		var gs := _bg_scale()
@@ -284,7 +374,7 @@ func _layout_nodes() -> void:
 func _on_node_pressed(index: int) -> void:
 	var item: String = GameState.trip["nodes"][index]["item"]
 	if not GameState.gather(index):
-		_message = "Немає місця: %s заповнене" % GameData.storage_name_of(item)
+		_message = "Немає місця: полиці заповнені"
 		refresh()
 		return
 	_message = ""
@@ -298,7 +388,7 @@ func _on_node_pressed(index: int) -> void:
 
 
 func _on_event_button() -> void:
-	if _expelled():
+	if _expelled() or GameState.trip.get("wisp", "") == "sunk":
 		GameState.leave_location()
 	elif GameState.trip.get("grave", "") == "closed":
 		var result := GameState.search_grave()
@@ -382,12 +472,23 @@ func _is_raining() -> bool:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if visible and event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
+		if _fishing.visible:
+			return
+		if _port_panel.visible:
+			_close_port()
+			get_viewport().set_input_as_handled()
+			return
 		GameState.leave_location()
 		get_viewport().set_input_as_handled()
 
 
 func _process(delta: float) -> void:
 	_time += delta
+	if GameState.trip.get("wisp", "") == "free":
+		# A lazy figure-eight over the bog, with a little jitter.
+		_wisp_pos = Vector2(160 + 118 * sin(_time * 0.21), 122 + 26 * sin(_time * 0.47 + 1.0)) \
+			+ Vector2(sin(_time * 5.1), cos(_time * 4.3)) * 2.0
+		_wisp_button.position = _to_screen(_wisp_pos) - _wisp_button.size / 2.0
 	if _timer_running:
 		var before := ceili(_timer_left)
 		_timer_left -= delta
@@ -435,6 +536,9 @@ func _draw_field() -> void:
 	var grave := _grave_spot()
 	if grave != Vector2.INF:
 		_draw_grave(grave, s)
+	if GameState.trip["location"] == "lake":
+		_draw_lake_water(s)
+	_draw_markers(s)
 	var nodes: Array = GameState.trip["nodes"]
 	var foggy := _is_foggy()
 	for i in nodes.size():
@@ -462,6 +566,8 @@ func _draw_field() -> void:
 	_field.draw_set_transform(Vector2.ZERO)
 	if foggy:
 		_draw_fog(s)
+	if GameState.trip.get("wisp", "") == "free":
+		_draw_wisp(s)
 
 
 ## A dug-up grave in bg pixels: a pile of earth, the dark pit and a shovel stuck in the ground.
@@ -520,3 +626,290 @@ func _counts_bbcode(counts: Dictionary) -> String:
 	for id in counts:
 		parts.append("%s ×%d" % [GameData.icon_bbcode(id, 20), counts[id]])
 	return "  ".join(parts)
+
+
+# ---------- Swamp: the wisp ----------
+
+func _draw_wisp(s: float) -> void:
+	var c := _to_screen(_wisp_pos)
+	var flick := 0.75 + 0.25 * sin(_time * 9.0) * sin(_time * 3.3)
+	var hot := _hover == "wisp"
+	for k in 5:  # a fading trail behind it
+		var t := _time - (k + 1) * 0.12
+		var p := Vector2(160 + 118 * sin(t * 0.21), 122 + 26 * sin(t * 0.47 + 1.0))
+		_field.draw_circle(_to_screen(p), s * (2.2 - k * 0.35), Color(0.5, 0.95, 1.0, 0.18 - k * 0.03))
+	_field.draw_circle(c, s * 16.0 * flick, Color(0.4, 0.9, 1.0, 0.07))
+	_field.draw_circle(c, s * 9.0 * flick, Color(0.45, 0.95, 1.0, 0.16 if not hot else 0.3))
+	_field.draw_circle(c, s * 4.2, Color(0.75, 1.0, 1.0, 0.8))
+	_field.draw_circle(c, s * 2.2, Color(1, 1, 1, 0.95))
+
+
+func _on_wisp_pressed() -> void:
+	var res := GameState.catch_wisp()
+	if res.is_empty():
+		return
+	_wisp_button.visible = false
+	_hover = ""
+	_event_title.text = res["title"]
+	_event_text.text = res["text"]
+	_event_button.text = "Вибратися в таверну" if GameState.trip.get("wisp", "") == "sunk" else "Збирати далі"
+	_event_button2.visible = false
+	_event_panel.visible = true
+	refresh()
+
+
+# ---------- Lake: the pier ----------
+
+func _open_fishing() -> void:
+	if GameState.fishing_casts_left() <= 0:
+		_message = "Закиди на сьогодні скінчилися"
+		refresh()
+		return
+	_hover = ""
+	_fishing.open()
+
+
+## Small golden arrows bobbing over the pier and the people of the port, so the player sees what can be clicked.
+func _draw_markers(s: float) -> void:
+	var loc: Dictionary = GameData.LOCATIONS[GameState.trip["location"]]
+	var spots: Dictionary = {}
+	if loc.has("fishing") and GameState.fishing_casts_left() > 0 and not _event_panel.visible:
+		spots["pier"] = Vector2(loc["fishing"][0], loc["fishing"][1] - 30)
+	if loc.get("kind", "") == "port" and not _event_panel.visible and not _port_panel.visible:
+		for who in loc.get("people", {}):
+			var r: Array = loc["people"][who]
+			if _person_here(who):
+				spots[who] = Vector2(r[0] + r[2] / 2.0, r[1] - 4)
+	for id in spots:
+		var p: Vector2 = spots[id] + Vector2(0, round(sin(_time * 3.0) * 1.5))
+		var col := Color(1.0, 0.9, 0.5) if _hover == id else Color(0.95, 0.76, 0.3, 0.85)
+		for row in 4:
+			_field.draw_rect(Rect2(_to_screen(p + Vector2(-3 + row, row)), Vector2(7 - row * 2, 1) * s), col)
+	if _hover in ["merchant", "smuggler"] and spots.has(_hover):
+		var r: Array = loc["people"][_hover]
+		_field.draw_rect(Rect2(_to_screen(Vector2(r[0], r[1])), Vector2(r[2], r[3]) * s), Color(1, 0.9, 0.5, 0.8), false, maxf(1.0, s * 0.5))
+	elif _hover == "pier":
+		var f := Vector2(loc["fishing"][0], loc["fishing"][1])
+		_field.draw_set_transform(_to_screen(f), 0.0, Vector2(1.0, 0.45))
+		_field.draw_circle(Vector2.ZERO, 16 * s, Color(1, 0.95, 0.6, 0.18))
+		_field.draw_set_transform(Vector2.ZERO)
+
+
+# ---------- Port ----------
+
+func _person_here(who: String) -> bool:
+	var port: Dictionary = GameState.port()
+	if who == "merchant":
+		return not port.get("merchant", []).is_empty() or GameState.trip.get("event", "") != "storm"
+	return port.get("smuggler_here", false)
+
+
+func _person_tooltip(who: String) -> String:
+	if who == "merchant":
+		if GameState.trip.get("event", "") == "storm":
+			return "Заморський купець\nКорабель сьогодні не прийшов."
+		return "Заморський купець\nЗаморські товари дешевше, ніж на ринку."
+	if not GameState.port().get("smuggler_here", false):
+		return "Контрабандист\nСьогодні на пристані митники, він не висовується."
+	return "Контрабандист\nКрадене за безцінь і темна робота. Тіньова гільдія це цінує, варта ні."
+
+
+func _open_port(who: String) -> void:
+	_port_who = who
+	_port_panel.visible = true
+	_hover = ""
+	Audio.play("open")
+	refresh()
+
+
+func _close_port() -> void:
+	_port_panel.visible = false
+	_port_who = ""
+	Audio.play("close")
+	refresh()
+
+
+func _fill_port_panel() -> void:
+	for child in _port_box.get_children():
+		_port_box.remove_child(child)
+		child.queue_free()
+	var who := _port_who
+	var port: Dictionary = GameState.port()
+	var head := HBoxContainer.new()
+	_port_box.add_child(head)
+	var title := Label.new()
+	title.text = PEOPLE.get(who, "")
+	title.add_theme_font_size_override("font_size", 22)
+	title.add_theme_color_override("font_color", GOLD)
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(title)
+	var close := Button.new()
+	close.text = "Відійти (Esc)"
+	close.focus_mode = Control.FOCUS_NONE
+	close.pressed.connect(_close_port)
+	head.add_child(close)
+	var talk := ""
+	if who == "merchant":
+		if port.get("merchant", []).is_empty():
+			talk = "Корабель не прийшов через шторм. Купця сьогодні немає." if GameState.trip.get("event", "") == "storm" else "«Усе розпродано, друже! Приходь, коли прийде наступний корабель.»"
+		else:
+			talk = "«Товар з-за моря, дешевше, ніж у вас на ринку! Бери, поки корабель не відплив.»"
+	elif not port.get("smuggler_here", false):
+		talk = "У темряві арки нікого. На пристані чергують митники."
+	elif not GameState.smuggler_talks():
+		talk = "Постать у каптурі відвертається: «Я з донощиками не говорю». (Потрібна Тіньова гільдія %d+, зараз %d.)" % [int(GameData.SMUGGLER["min_crime"]), GameState.faction_value("crime")]
+	else:
+		talk = "«Тихіше... Мита не платимо, питань не ставимо. Товар чистий, як сумління судді.» Його товар крадений: варта це не любить."
+	_port_box.add_child(_text(talk, 16, TEXT))
+	var lots: Array = port.get(who, [])
+	if who == "smuggler" and not GameState.smuggler_talks():
+		lots = []
+	for i in lots.size():
+		var lot: Dictionary = lots[i]
+		if int(lot["n"]) <= 0:
+			continue
+		_port_box.add_child(_lot_row(who, i, lot))
+	if who == "smuggler" and port.get("smuggler_here", false) and GameState.smuggler_talks():
+		_port_box.add_child(HSeparator.new())
+		var job: Dictionary = GameData.SMUGGLER["job"]
+		if not GameState.smuggle_job.is_empty():
+			_port_box.add_child(_text("Його запечатаний ящик стоїть у тебе. Він забере його на %d-й день і заплатить %s." % [
+				int(GameState.smuggle_job["due"]), Wallet.format_amount(int(GameState.smuggle_job["pay"]))], 15, MUTED))
+		elif port.get("job", false):
+			_port_box.add_child(_text("«Є робота. Постав мій ящик у себе в погребі на %d дні. Нічого не відкривай. Прийду сам і заплачу: %s»\nПоки ящик у таверні, варта може навідатися з перевіркою (%d%% щоранку). Знайде: штраф %d, підозра +%d, гільдія %d." % [
+				int(job["days"]), Wallet.format_amount(GameState.smuggle_pay()), roundi(float(job["inspect_chance"]) * 100), int(job["fine"]), int(job["susp_found"]), int(job["crime_lost"])], 15, TEXT))
+			var b := Button.new()
+			b.text = "Взяти ящик (+%d зол. через %d дні)" % [GameState.smuggle_pay(), int(job["days"])]
+			b.focus_mode = Control.FOCUS_NONE
+			var problem := GameState.smuggle_job_problem()
+			b.disabled = problem != ""
+			b.tooltip_text = problem
+			b.pressed.connect(func(): GameState.take_smuggle_job())
+			_port_box.add_child(b)
+		else:
+			_port_box.add_child(_text("Ящик домовлено. Він прийде по нього сам.", 15, MUTED))
+	var tip := _text("Золото: %d. Що купиш, ляже на свою полицю чи горище." % GameState.wallet.total, 14, MUTED)
+	_port_box.add_child(tip)
+
+
+func _lot_row(who: String, index: int, lot: Dictionary) -> Control:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+	var item: Dictionary = GameData.ITEMS[lot["item"]]
+	var icon := TextureRect.new()
+	icon.texture = GameData.icon_texture(lot["item"])
+	icon.custom_minimum_size = Vector2(36, 36)
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	icon.tooltip_text = "%s\n%s" % [item["name"], item["desc"]]
+	row.add_child(icon)
+	var label := RichTextLabel.new()
+	label.bbcode_enabled = true
+	label.fit_content = true
+	label.scroll_active = false
+	label.autowrap_mode = TextServer.AUTOWRAP_OFF
+	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	label.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	label.add_theme_font_size_override("normal_font_size", 16)
+	label.add_theme_color_override("default_color", TEXT)
+	var market := GameState.item_cost(lot["item"])
+	var cmp := ("  [color=#8fc070](ринок %d)[/color]" % market) if market > 0 else ""
+	label.text = "%s ×%d   %s за шт.%s   [color=#b8a48c]продаж ~%d[/color]" % [item["name"], int(lot["n"]), Wallet.format_amount(int(lot["price"]), true), cmp, GameState.item_price(lot["item"])]
+	label.tooltip_text = icon.tooltip_text
+	row.add_child(label)
+	for count in ([1, int(lot["n"])] if int(lot["n"]) > 1 else [1]):
+		var b := Button.new()
+		b.text = "Купити ×%d" % count if count == 1 else "Усе ×%d" % count
+		b.focus_mode = Control.FOCUS_NONE
+		var problem := GameState.port_problem(who, index, count)
+		b.disabled = problem != ""
+		b.tooltip_text = problem if problem != "" else "Разом: %d зол." % (int(lot["price"]) * count)
+		b.pressed.connect(func(): GameState.port_buy(who, index, count))
+		row.add_child(b)
+	return row
+
+
+func _text(t: String, size: int, color: Color) -> Label:
+	var l := Label.new()
+	l.text = t
+	l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	l.custom_minimum_size = Vector2(520, 0)
+	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_color_override("font_color", color)
+	return l
+
+
+# ---------- Lake: animated water ----------
+## The lake in lake.png (bg pixels): water from LAKE_TOP down to the shore line (same formula as gen_locations2.py),
+## the pier around x = LAKE_PIER_X from y 112, the rowboat. Waves are drawn over the background, under the resources.
+const LAKE_TOP := 76
+const LAKE_PIER_X := 222
+
+
+func _lake_shore(x: float) -> float:
+	return 132.0 + 3.0 * sin(x * 0.05) + 2.0 * sin(x * 0.13)
+
+
+## True if a water pixel is covered by the pier or the boat (no waves there).
+func _lake_blocked(x: float, y: float) -> bool:
+	if y >= 111.0 and absf(x - LAKE_PIER_X) < 13.0 + 16.0 * (y - 112.0) / 68.0:
+		return true
+	return x > 168.0 and x < 200.0 and y > 117.0 and y < 127.0
+
+
+func _water_line(x: float, y: float, w: float, s: float, col: Color) -> void:
+	var x0 := floorf(x)
+	var x1 := x0 + w
+	if y >= _lake_shore(x0) - 1.0:
+		return
+	while x0 < x1:  # cut the line where the pier or the boat is
+		if not _lake_blocked(x0, y):
+			var e := x0
+			while e < x1 and not _lake_blocked(e, y):
+				e += 1.0
+			_field.draw_rect(Rect2(_to_screen(Vector2(x0, floorf(y))), Vector2(e - x0, 1) * s), col)
+			x0 = e
+		else:
+			x0 += 1.0
+
+
+func _draw_lake_water(s: float) -> void:
+	# Wave crests: short light dashes that drift sideways, swell and fade. Closer = longer and slower.
+	for i in 70:
+		var depth := float(i) / 70.0                     # 0 = far, 1 = near the shore
+		var y := LAKE_TOP + 2.0 + depth * depth * 54.0 + float((i * 7) % 5)
+		var speed := 3.0 + (1.0 - depth) * 4.0
+		var x := fmod(i * 97.0 + _time * speed * (1.0 if i % 2 else -0.6) + 400.0, 360.0) - 20.0
+		var life := 0.5 + 0.5 * sin(_time * (0.8 + (i % 5) * 0.17) + i * 1.3)
+		if life < 0.25:
+			continue
+		var w := roundf((2.0 + depth * 7.0) * life)
+		var a := 0.18 + 0.4 * life
+		_water_line(x, y, w, s, Color(0.85, 0.95, 1.0, a))
+		if depth > 0.4 and life > 0.7:                   # a darker trough under near crests
+			_water_line(x + 1.0, y + 1.0, w - 1.0, s, Color(0.12, 0.3, 0.45, 0.35))
+	# Sun glints: twinkling pixels on the bright path in the middle of the lake.
+	for i in 24:
+		var gx := 110.0 + fmod(i * 37.0, 100.0)
+		var gy := LAKE_TOP + 3.0 + fmod(i * 23.0, 48.0)
+		var tw := sin(_time * 3.0 + i * 2.1)
+		if tw > 0.6:
+			_water_line(gx, gy, 1.0 + roundf(tw * 1.5), s, Color(1.0, 1.0, 0.9, (tw - 0.6) * 2.2))
+	# Rings around the pier posts and the boat.
+	for r in [[208.0, 122.0, 0.0], [236.0, 122.0, 1.1], [205.0, 136.0, 0.5], [184.0, 126.0, 1.6]]:
+		var k := fmod(_time * 0.45 + float(r[2]), 1.0)
+		var rad := 2.0 + k * 9.0
+		var col := Color(0.85, 0.95, 1.0, 0.45 * (1.0 - k))
+		_water_line(r[0] - rad, r[1] + k * 1.5, 3.0, s, col)
+		_water_line(r[0] + rad - 3.0, r[1] + k * 1.5, 3.0, s, col)
+	# The shore: water runs up the sand and back, leaving a foam line and a wet strip.
+	var x := 0.0
+	while x < BG_SIZE.x:
+		var shore := _lake_shore(x)
+		var surge := (sin(_time * 1.3 + x * 0.035) + 1.0) * 1.6 + sin(_time * 2.1 + x * 0.11) * 0.5
+		if not _lake_blocked(x, shore):
+			var top := shore - 1.0
+			_field.draw_rect(Rect2(_to_screen(Vector2(x, top)), Vector2(2, maxf(1.0, roundf(surge))) * s), Color(0.55, 0.78, 0.9, 0.55))
+			_field.draw_rect(Rect2(_to_screen(Vector2(x, top + roundf(surge))), Vector2(2, 1) * s), Color(0.95, 0.98, 1.0, 0.75))
+		x += 2.0
