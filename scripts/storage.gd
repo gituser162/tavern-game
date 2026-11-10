@@ -1,5 +1,7 @@
 extends RefCounted
-## The tavern storage: several separate places (shelves for food, drinks, potions, gear; the attic), see GameData.STORAGES.
+## The tavern storage: several places (4 shelves under the counter, the attic), see GameData.STORAGES. Any item can lie
+## in any place that is built (2026-11-10: no categories); a new piece goes where the same item already lies, else to
+## the first built place with room (resources try the attic first). Places not built yet are "locked" (no open cells).
 ## Every place is a grid of cells: `surfaces` levels (the middle shelf and the floor plank), each `cols` x `rows`.
 ## Every item has a shape (GameData.item_size, w x h cells) and takes those cells; items never overlap.
 ## A piece can be turned by 90 degrees ("r": true), then it takes h x w cells.
@@ -13,6 +15,10 @@ var layout: Dictionary = {}
 var _next_uid := 1
 ## piece uid -> where it came from: {"c": what it cost the keeper in gold, "k": "buy" | "craft" | "free"}.
 var origins: Dictionary = {}
+## Grid sizes changed by the tavern upgrades (set by GameState.apply_upgrades): place id -> {"cols", "rows", "top"}.
+## "top": per level, the first open row (rows above it are closed: the shelf is not built that high yet).
+## "locked": true = the place is not built yet (no open cells at all).
+static var grid_override: Dictionary = {}
 
 
 func clear() -> void:
@@ -25,14 +31,68 @@ func count(item_id: String) -> int:
 	return items.get(item_id, 0)
 
 
-## Id of the storage place where this item is kept.
-static func place_of(item_id: String) -> String:
-	return GameData.storage_of_category(GameData.ITEMS[item_id]["cat"])
+## Id of the place where a piece of this item lies ("" if there is none).
+func place_of(item_id: String) -> String:
+	for place_id in layout:
+		for p in layout[place_id]:
+			if p["id"] == item_id:
+				return place_id
+	return ""
 
 
+## True if this place is built (the shelves and the attic open with the upgrades).
+static func is_open(place_id: String) -> bool:
+	return not grid_override.get(place_id, {}).get("locked", false)
+
+
+## Places that are built, in the order of GameData.STORAGES.
+static func open_places() -> Array:
+	var result: Array = []
+	for place_id in GameData.STORAGES:
+		if is_open(place_id):
+			result.append(place_id)
+	return result
+
+
+## Where a new piece of this item is tried, in order: places that already hold it, then the other built places
+## (resources: the attic before the shelves; everything else: the shelves before the attic).
+func places_for(item_id: String) -> Array:
+	var holding: Array = []
+	var rest: Array = []
+	for place_id in open_places():
+		var has_it := false
+		for p in pieces(place_id):
+			if p["id"] == item_id:
+				has_it = true
+				break
+		(holding if has_it else rest).append(place_id)
+	if rest.has("attic"):
+		rest.erase("attic")
+		if GameData.ITEMS[item_id]["cat"] == "resource":
+			rest.push_front("attic")
+		else:
+			rest.append("attic")
+	return holding + rest
+
+
+## Grid of a place: cols, rows, surfaces (levels) and "top" (first open row of every level).
 static func grid_of(place_id: String) -> Dictionary:
 	var p: Dictionary = GameData.STORAGES[place_id]
-	return {"cols": p["cols"], "rows": p["rows"], "surfaces": p.get("surfaces", 2)}
+	var g := {"cols": p["cols"], "rows": p["rows"], "surfaces": p.get("surfaces", 2)}
+	var o: Dictionary = grid_override.get(place_id, {})
+	for key in o:
+		g[key] = o[key]
+	if g.get("locked", false):
+		var shut: Array = []
+		for s in g["surfaces"]:
+			shut.append(g["rows"])
+		g["top"] = shut
+	elif not g.has("top"):
+		var top: Array = []
+		for s in g["surfaces"]:
+			top.append(0)
+		g["top"] = top
+	return g
 
 
 func pieces(place_id: String) -> Array:
@@ -60,21 +120,47 @@ func used(place_id: String) -> int:
 	return n
 
 
-## All cells of this place.
+## All open cells of this place.
 func capacity(place_id: String) -> int:
 	var g := grid_of(place_id)
-	return g["cols"] * g["rows"] * g["surfaces"]
+	var n := 0
+	for s in g["surfaces"]:
+		n += g["cols"] * (g["rows"] - int(g["top"][s]))
+	return n
 
 
 func free_space(place_id: String) -> int:
 	return maxi(0, capacity(place_id) - used(place_id))
 
 
+## Free cells in all built places together.
+func free_total() -> int:
+	var n := 0
+	for place_id in open_places():
+		n += free_space(place_id)
+	return n
+
+
+## Open cells in all built places together.
+func capacity_total() -> int:
+	var n := 0
+	for place_id in open_places():
+		n += capacity(place_id)
+	return n
+
+
+func used_total() -> int:
+	var n := 0
+	for place_id in layout:
+		n += used(place_id)
+	return n
+
+
 ## True if an item of this shape can lie at (s, x, y) among `list` (piece number `ignore` does not count).
 static func fits(place_id: String, list: Array, item_id: String, s: int, x: int, y: int, ignore: int = -1, turned: bool = false) -> bool:
 	var g := grid_of(place_id)
 	var sz := size_of(item_id, turned)
-	if s < 0 or s >= g["surfaces"] or x < 0 or y < 0 or x + sz.x > g["cols"] or y + sz.y > g["rows"]:
+	if s < 0 or s >= g["surfaces"] or x < 0 or y < int(g["top"][s]) or x + sz.x > g["cols"] or y + sz.y > g["rows"]:
 		return false
 	for i in list.size():
 		if i == ignore:
@@ -111,7 +197,7 @@ static func find_spot(place_id: String, list: Array, item_id: String) -> Diction
 	for turned in ([false, true] if base.x != base.y else [false]):
 		var sz := size_of(item_id, turned)
 		for s in surfaces:
-			for y in range(rows - sz.y, -1, -1):
+			for y in range(rows - sz.y, int(g["top"][s]) - 1, -1):
 				for x in cols - sz.x + 1:
 					var is_free := true
 					for yy in range(y, y + sz.y):
@@ -175,42 +261,74 @@ func plan_add(place_id: String, new_ids: Array) -> Array:
 	return pack(place_id, entries)
 
 
-## True if n more pieces of this item fit into its storage place.
+## Where these new items would go in all places: {place id: full new list of its pieces} for every place that
+## changes (new pieces have uid 0), or {} if they cannot all fit. Every piece first takes a free spot (places from
+## places_for); if there is none anywhere, a place is laid out anew with it.
+func plan_pieces(new_ids: Array) -> Dictionary:
+	var lists := {}
+	var ordered := new_ids.duplicate()
+	ordered.sort_custom(_bigger_first)
+	for id in ordered:
+		var order := places_for(id)
+		var placed := false
+		for place_id in order:
+			if not lists.has(place_id):
+				lists[place_id] = pieces(place_id).duplicate(true)
+			var spot := find_spot(place_id, lists[place_id], id)
+			if not spot.is_empty():
+				spot["uid"] = 0
+				lists[place_id].append(spot)
+				placed = true
+				break
+		if not placed:
+			for place_id in order:
+				var entries: Array = []
+				for p in lists[place_id]:
+					entries.append({"id": p["id"], "uid": p["uid"]})
+				entries.append({"id": id, "uid": 0})
+				var packed := pack(place_id, entries)
+				if not packed.is_empty():
+					lists[place_id] = packed
+					placed = true
+					break
+		if not placed:
+			return {}
+	return lists
+
+
+## True if n more pieces of this item fit into the storage.
 func can_fit(item_id: String, n: int = 1) -> bool:
 	var ids: Array = []
 	for i in n:
 		ids.append(item_id)
-	return not plan_add(place_of(item_id), ids).is_empty()
+	return ids.is_empty() or not plan_pieces(ids).is_empty()
 
 
-## True if a whole order {item: n} fits (every place checked on its own).
+## True if a whole order {item: n} fits into the storage at once.
 func can_fit_order(order: Dictionary) -> bool:
-	var by_place := {}
+	var ids: Array = []
 	for id in order:
-		var place := place_of(id)
-		if not by_place.has(place):
-			by_place[place] = []
 		for i in int(order[id]):
-			by_place[place].append(id)
-	for place in by_place:
-		if not by_place[place].is_empty() and plan_add(place, by_place[place]).is_empty():
-			return false
-	return true
+			ids.append(id)
+	return ids.is_empty() or not plan_pieces(ids).is_empty()
 
 
-## Puts one piece into its storage place. Returns false (and changes nothing) if it does not fit.
-## origin: what the piece cost the keeper, {"c": gold, "k": "buy" | "craft" | "free"} (empty = got it for free).
+## Puts one piece into the storage. Returns false (and changes nothing) if it does not fit.
+## origin: what the piece cost the keeper, {"c": gold, "k": "buy" | "craft" | "free", "q": quality (crafted only)}
+## (empty = got it for free).
 func add(item_id: String, origin: Dictionary = {}) -> bool:
-	var place := place_of(item_id)
-	var list := plan_add(place, [item_id])
-	if list.is_empty():
+	var lists := plan_pieces([item_id])
+	if lists.is_empty():
 		return false
-	for p in list:
-		if p["uid"] == 0:
-			p["uid"] = _next_uid
-			origins[_next_uid] = {"c": int(origin.get("c", 0)), "k": origin.get("k", "free")}
-			_next_uid += 1
-	layout[place] = list
+	for place in lists:
+		for p in lists[place]:
+			if p["uid"] == 0:
+				p["uid"] = _next_uid
+				origins[_next_uid] = {"c": int(origin.get("c", 0)), "k": origin.get("k", "free")}
+				if origin.has("q"):
+					origins[_next_uid]["q"] = int(origin["q"])  # quality of a brewed / cooked piece (GameData.QUALITY)
+				_next_uid += 1
+		layout[place] = lists[place]
 	items[item_id] = count(item_id) + 1
 	return true
 
@@ -226,13 +344,20 @@ func take_piece(item_id: String) -> Dictionary:
 	if count(item_id) <= 0:
 		return {}
 	var origin := {"c": 0, "k": "free"}
-	var list := pieces(place_of(item_id))
-	for i in range(list.size() - 1, -1, -1):
-		if list[i]["id"] == item_id:
-			origin = origins.get(list[i]["uid"], origin)
-			origins.erase(list[i]["uid"])
-			list.remove_at(i)
-			break
+	# The newest piece (biggest uid) of this item, wherever it lies.
+	var best_place := ""
+	var best_i := -1
+	for place_id in layout:
+		var list: Array = layout[place_id]
+		for i in list.size():
+			if list[i]["id"] == item_id and (best_i < 0 or int(list[i]["uid"]) > int(layout[best_place][best_i]["uid"])):
+				best_place = place_id
+				best_i = i
+	if best_i >= 0:
+		var list: Array = layout[best_place]
+		origin = origins.get(list[best_i]["uid"], origin)
+		origins.erase(list[best_i]["uid"])
+		list.remove_at(best_i)
 	items[item_id] -= 1
 	if items[item_id] <= 0:
 		items.erase(item_id)
@@ -273,20 +398,41 @@ func origin_of(uid: int) -> Dictionary:
 ## Origins of all pieces of this item in storage.
 func origins_of(item_id: String) -> Array[Dictionary]:
 	var result: Array[Dictionary] = []
-	for p in pieces(place_of(item_id)):
-		if p["id"] == item_id:
-			result.append(origins.get(p["uid"], {"c": 0, "k": "free"}))
+	for place_id in layout:
+		for p in layout[place_id]:
+			if p["id"] == item_id:
+				result.append(origins.get(p["uid"], {"c": 0, "k": "free"}))
 	return result
 
 
-## Moves the piece with this uid to (s, x, y), turned or not. Returns false if it does not fit there.
+## Moves the piece with this uid to (s, x, y) of place_id, turned or not; the piece may come from another place.
+## Returns false if it does not fit there.
 func move(place_id: String, uid: int, s: int, x: int, y: int, turned: bool = false) -> bool:
 	var list := pieces(place_id)
 	var index := -1
 	for i in list.size():
 		if list[i]["uid"] == uid:
 			index = i
-	if index < 0 or not fits(place_id, list, list[index]["id"], s, x, y, index, turned):
+	if index < 0:
+		# From another place: it must fit among the pieces here, then it moves over.
+		for other in layout:
+			if other == place_id:
+				continue
+			var from: Array = layout[other]
+			for i in from.size():
+				if from[i]["uid"] == uid:
+					if not is_open(place_id) or not fits(place_id, list, from[i]["id"], s, x, y, -1, turned):
+						return false
+					var p: Dictionary = from[i]
+					from.remove_at(i)
+					p["r"] = turned
+					p["s"] = s
+					p["x"] = x
+					p["y"] = y
+					list.append(p)
+					return true
+		return false
+	if not fits(place_id, list, list[index]["id"], s, x, y, index, turned):
 		return false
 	list[index]["r"] = turned
 	list[index]["s"] = s
@@ -316,12 +462,25 @@ func ids_in_category(cat: String) -> Array[String]:
 	return result
 
 
-## Item ids kept in one storage place, in the order of GameData.ITEMS.
+## Item ids lying in one storage place, in the order of GameData.ITEMS.
 func ids_in_place(place_id: String) -> Array[String]:
+	var here := {}
+	for p in pieces(place_id):
+		here[p["id"]] = true
 	var result: Array[String] = []
-	for cat in GameData.STORAGES[place_id]["cats"]:
-		result.append_array(ids_in_category(cat))
+	for id in GameData.ITEMS:
+		if here.has(id):
+			result.append(id)
 	return result
+
+
+## How many pieces of this item lie in one place.
+func count_in(place_id: String, item_id: String) -> int:
+	var n := 0
+	for p in pieces(place_id):
+		if p["id"] == item_id:
+			n += 1
+	return n
 
 
 func snapshot() -> Dictionary:

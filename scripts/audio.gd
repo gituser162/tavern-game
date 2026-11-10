@@ -8,14 +8,15 @@ const MUSIC_DIR := "res://assets/audio/music/"
 const SFX_DIR := "res://assets/audio/sfx/"
 const SETTINGS_PATH := "user://settings.cfg"
 ## Music for each place: "tavern" or a location id.
-const MUSIC := {"tavern": "tavern", "forest": "forest", "graveyard": "graveyard"}
+const MUSIC := {"tavern": "tavern", "forest": "forest", "graveyard": "graveyard", "swamp": "swamp", "lake": "lake", "port": "port"}
 ## Loudness of each sound effect in dB (0 = as generated). Missing = 0.
 const SFX_DB := {
 	"click": -9.0, "open": -8.0, "close": -9.0, "page": -6.0, "gather": -4.0, "visitor": -6.0,
-	"bell": -3.0, "coin": -3.0, "buy": -4.0, "door": -3.0, "shelf": -5.0,
+	"bell": -3.0, "coin": -3.0, "buy": -4.0, "door": -3.0, "shelf": -5.0, "pour": -4.0,
+	"splash": -5.0, "cast": -6.0, "bite": -4.0, "catch": -3.0, "wisp": -4.0,
 }
 ## Sounds that get a slightly random pitch every time, so repeats do not sound mechanical.
-const SFX_VARY := ["click", "shelf", "gather", "coin", "dig", "brawl", "visitor"]
+const SFX_VARY := ["click", "shelf", "gather", "coin", "dig", "brawl", "visitor", "splash", "cast"]
 const MUSIC_DB := -9.0
 const FIRE_DB := -12.0
 const FADE_TIME := 1.2
@@ -100,6 +101,13 @@ func _follow_game() -> void:
 	var place: String = GameState.trip.get("location", "tavern") if not GameState.trip.is_empty() else "tavern"
 	set_music(MUSIC.get(place, "tavern"))
 	_set_fire(place == "tavern")
+
+
+## Music of the main menu: the tavern tune and the fire.
+func play_menu_music() -> void:
+	_game_over_played = false
+	set_music("tavern")
+	_set_fire(true)
 
 
 ## Crossfades to a track ("" = silence). The same track keeps playing from where it is.

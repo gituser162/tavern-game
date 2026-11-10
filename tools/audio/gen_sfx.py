@@ -130,6 +130,39 @@ def sfx():
     S["victory"] = victory()
     S["defeat"] = seq([N("C5"), N("G4"), N("Eb4"), N("D4"), N("C4")], 0.28,
                       lambda f: tri(f, int(0.7 * SR), vib=0.01) * env(int(0.7 * SR), 0.01, 0.1, 0.7, 0.3))
+    # beer keg on the counter: the tap squeaks open, ale gurgles into a tankard (pitch rises as it fills), clunk
+    pr = np.zeros(int(1.25 * SR))
+    n = int(0.07 * SR)
+    pr[:n] += lowpass(saw(np.linspace(700, 1150, n), n), 2500) * env(n, 0.005, 0.02, 0.7, 0.02) * 0.25
+    n = int(0.85 * SR)
+    a0 = int(0.08 * SR)
+    stream = lowpass(highpass(noise(n), 350), 1800) * env(n, 0.04, 0.1, 0.8, 0.12) * 0.35
+    pr[a0:a0 + n] += stream
+    for i in range(26):
+        m = int(rng.uniform(0.02, 0.045) * SR)
+        f0 = rng.uniform(380, 560) * (1 + 0.9 * i / 26)
+        b = sine(np.linspace(f0, f0 * 1.9, m), m) * env(m, 0.002, 0.01, 0.6, 0.01)
+        a = a0 + int((i / 26 * 0.78 + rng.uniform(0, 0.03)) * SR)
+        pr[a:a + m] += b * rng.uniform(0.25, 0.55)
+    tk = thump(320, 160, 0.14, 0.03, 0.6) * 0.8
+    a = int(1.0 * SR)
+    pr[a:a + len(tk)] += tk[:len(pr) - a]
+    S["pour"] = pr
+    # carpenter's work done (tavern upgrade): three hammer knocks on wood, a short saw stroke, a bright "ta-da"
+    bd = np.zeros(int(1.3 * SR))
+    for i, t in enumerate((0.0, 0.16, 0.32)):
+        k = thump(420 - i * 30, 170, 0.12, 0.022, 0.8) * 0.9 + np.pad(blip(2600, 0.02, 0.25, 0.006) * 0.3, (0, int(0.1 * SR)))
+        a = int(t * SR)
+        bd[a:a + len(k)] += k
+    n = int(0.22 * SR)
+    saw_ = lowpass(highpass(noise(n), 900), 4200) * np.abs(np.sin(np.linspace(0, 3 * np.pi, n))) * 0.35
+    a = int(0.5 * SR)
+    bd[a:a + n] += saw_
+    for i, m in enumerate(("C5", "E5", "G5")):
+        nt = lead_note(N(m), 0.18 if i < 2 else 0.4)
+        a = int((0.78 + i * 0.09) * SR)
+        bd[a:a + len(nt)] += nt[:len(bd) - a] * 0.45
+    S["build"] = bd
     return S
 
 

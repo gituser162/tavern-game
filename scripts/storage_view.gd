@@ -41,11 +41,8 @@ func _make_card(place_id: String, row: Control) -> Dictionary:
 	var panel := PanelContainer.new()
 	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	# Places with many kinds of items (like the attic) get a wider card.
-	var kinds := 0
-	for cat in place["cats"]:
-		kinds += GameData.items_of(cat).size()
-	panel.size_flags_stretch_ratio = maxf(1.0, kinds / 4.0)
+	# Places with a bigger grid (like the attic) get a wider card.
+	panel.size_flags_stretch_ratio = maxf(1.0, int(place["cols"]) / 8.0)
 	panel.tooltip_text = place.get("desc", "")
 	var style := StyleBoxFlat.new()
 	style.bg_color = CARD_BG
@@ -101,7 +98,7 @@ func refresh() -> void:
 			empty.add_theme_color_override("font_color", MUTED)
 			tiles.add_child(empty)
 		for id in ids:
-			tiles.add_child(_make_tile(id, st.count(id)))
+			tiles.add_child(_make_tile(id, st.count_in(place_id, id)))
 
 
 func _make_tile(id: String, n: int) -> Control:

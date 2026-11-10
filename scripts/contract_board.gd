@@ -20,6 +20,11 @@ const INK := Color("6e5e44")
 const SHADOW := Color(0.08, 0.05, 0.03, 0.55)
 ## Pin colour shows the difficulty of the contract.
 const PIN_COLORS := {"easy": Color("7fb04f"), "medium": Color("e0b840"), "hard": Color("c8402e")}
+## Criminal orders are written on dark, soot-stained paper; state contracts carry a blue wax seal.
+const CRIME_PAPER := Color("5a4a52")
+const CRIME_PAPER_DARK := Color("43363d")
+const CRIME_INK := Color("1e161b")
+const SEAL := Color("3f68a8")
 
 ## Tier id of every note on the board ("easy", "medium", "hard").
 var tiers: Array = []:
@@ -27,6 +32,11 @@ var tiers: Array = []:
 		tiers = value
 		if hovered >= tiers.size():
 			hovered = -1
+		queue_redraw()
+## Who gives every note: "people", "state" or "crime" (see GameData.CONTRACT_FACTIONS).
+var kinds: Array = []:
+	set(value):
+		kinds = value
 		queue_redraw()
 ## Notes drawn faded (e.g. contracts the hero at the counter refuses).
 var faded: Array = []:
@@ -83,10 +93,13 @@ func _update_cursor() -> void:
 func _draw() -> void:
 	var k := size.x / RECT.size.x
 	for i in mini(tiers.size(), SPOTS.size()):
-		_draw_note(SPOTS[i], String(tiers[i]), i, k)
+		_draw_note(SPOTS[i], String(tiers[i]), i, k, String(kinds[i]) if i < kinds.size() else "people")
 
 
-func _draw_note(at: Vector2i, tier: String, index: int, k: float) -> void:
+func _draw_note(at: Vector2i, tier: String, index: int, k: float, kind: String = "people") -> void:
+	var paper := CRIME_PAPER if kind == "crime" else PAPER
+	var paper_dark := CRIME_PAPER_DARK if kind == "crime" else PAPER_DARK
+	var ink := CRIME_INK if kind == "crime" else INK
 	# Hovered note lights up and lifts a little, like the other objects in the room.
 	var lit := index == hovered
 	var tint := Color(1.25, 1.2, 1.0) if lit else Color.WHITE
@@ -99,18 +112,29 @@ func _draw_note(at: Vector2i, tier: String, index: int, k: float) -> void:
 	var w := NOTE.x
 	var h := NOTE.y - (index % 2)  # notes are not all the same, so the board looks hand-filled
 	p.call(1, 1, w, h, SHADOW, true)
-	p.call(0, 0, w, h, PAPER)
-	p.call(0, h - 1, w, 1, PAPER_DARK)
-	p.call(w - 1, 0, 1, h, PAPER_DARK)
+	p.call(0, 0, w, h, paper)
+	p.call(0, h - 1, w, 1, paper_dark)
+	p.call(w - 1, 0, 1, h, paper_dark)
 	# folded lower corner
-	p.call(w - 3, h - 3, 3, 3, PAPER_DARK)
+	p.call(w - 3, h - 3, 3, 3, paper_dark)
 	p.call(w - 2, h - 2, 2, 2, SHADOW.darkened(0.2))
 	# heading and text lines
-	p.call(2, 3, w - 5, 1, INK)
+	p.call(2, 3, w - 5, 1, ink)
 	for ly in range(6, h - 2, 2):
 		var lw := w - 4 - ((ly + index) % 3)
-		p.call(2, ly, lw, 1, INK.lerp(PAPER, 0.35))
+		p.call(2, ly, lw, 1, ink.lerp(paper, 0.35))
 	# pin (colour = difficulty)
 	var pin: Color = PIN_COLORS.get(tier, Color("b0b0b8"))
 	p.call(w / 2 - 1, -1, 2, 2, pin)
 	p.call(w / 2 - 1, -1, 1, 1, pin.lightened(0.45))
+	if kind == "state":
+		# a blue wax seal in the lower left corner
+		p.call(1, h - 4, 3, 3, SEAL)
+		p.call(1, h - 4, 1, 1, SEAL.lightened(0.4))
+	elif kind == "crime":
+		# a dark red X instead of a heading
+		p.call(w - 5, 2, 1, 1, Color("8a2a2a"))
+		p.call(w - 3, 2, 1, 1, Color("8a2a2a"))
+		p.call(w - 4, 3, 1, 1, Color("8a2a2a"))
+		p.call(w - 5, 4, 1, 1, Color("8a2a2a"))
+		p.call(w - 3, 4, 1, 1, Color("8a2a2a"))
