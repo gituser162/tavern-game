@@ -514,6 +514,37 @@ const LOCATION_EVENTS := {
 ## hold the mouse to keep the green zone on the fish until the progress bar is full.
 ## fish: item -> weight (chance), power [min, max] of the cast where it bites, speed (how wildly it moves, 1 = normal),
 ## zone (height of the catch zone in px of the 60 px bar: smaller = harder). "gold": a lost purse instead of a fish.
+## Gathering mini-games in locations (scripts/gather_game.gd): item -> kind of gesture.
+## Items not listed here (glowing mushrooms...) are picked up with a plain click.
+const GATHER_KINDS := {
+	"herbs": "pull", "burdock": "pull", "nightshade": "pull", "swamp_moss": "pull", "lake_weed": "pull",
+	"mandrake": "mandrake",
+	"berries": "shake",
+	"bones": "dig", "grave_dust": "dig",
+	"toad": "catch", "crayfish": "catch", "ether_essence": "catch",
+}
+## Result of a mini-game: great = 2 pieces, ok = 1, failed = 0 (the resource is spoiled / runs away).
+const GATHER := {
+	"pull_dist": 45.0,          # scene pixels of mouse movement up to pull the plant out
+	"pull_snap_speed": 60.0,    # pulling faster than this (px/s, the root's grip changes it by +-25%) snaps it
+	"pull_back": 0.12,          # how fast the plant sinks back while the button is released (part per second)
+	"pull_great_time": 1.9,     # out in this many seconds and never near the snap = +1 piece
+	"shriek_every": [1.2, 2.2], # mandrake: seconds between shrieks
+	"shriek_time": 0.8,         # how long it shrieks
+	"shriek_still": 18.0,       # moving it faster than this during a shriek = it slips away
+	"berries": 5,               # berries shaken off the bush; caught all but one = great, 2+ = ok
+	"shake_cooldown": 0.35,
+	"basket_speed": 150.0,      # px/s
+	"dig_layers": [3, 5],       # shovel clicks before the find shows (one more = cracked, only ok)
+	"brush_dist": 260.0,        # cursor movement over the find to sweep it clean
+	"catch_radius": 10.0,
+	"catch_misses": 3,
+	"catch_hops": 9,            # after so many hops it gets away
+	"sit_start": 1.0,           # seconds it sits still, shorter after each hop
+	"sit_min": 0.45,
+	"catch_time": 9.0,          # ether essence fades after so many seconds
+}
+
 const FISHING := {
 	"casts": 3, "wait": [1.4, 3.6], "bite_window": 0.9, "start": 0.3, "gain": 0.42, "loss": 0.3,
 	"fish": {

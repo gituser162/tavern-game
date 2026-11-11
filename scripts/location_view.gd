@@ -5,6 +5,7 @@ extends Control
 
 const GameData := preload("res://scripts/game_data.gd")
 const FishingGame := preload("res://scripts/fishing_game.gd")
+const GatherGame := preload("res://scripts/gather_game.gd")
 const Wallet := preload("res://scripts/wallet.gd")
 
 const BG_SIZE := Vector2(320, 180)
@@ -41,6 +42,9 @@ var _drops: Array[Vector3] = []
 ## Lake: the pier where the rod is cast and the fishing mini-game.
 var _pier_button: Button
 var _fishing: FishingGame
+## The gathering mini-game and the resource it is open for.
+var _gather: GatherGame
+var _gather_index: int = -1
 ## Swamp: the will-o'-wisp (bg pixels) and the button that follows it.
 var _wisp_button: Button
 var _wisp_pos := Vector2(-100, -100)
@@ -180,6 +184,9 @@ func _ready() -> void:
 	_fishing = FishingGame.new()
 	_fishing.closed.connect(refresh)
 	add_child(_fishing)
+	_gather = GatherGame.new()
+	_gather.finished.connect(_on_gather_finished)
+	add_child(_gather)
 
 
 ## A flat clickable area over something drawn on the background (no look of its own).
@@ -295,6 +302,8 @@ func _start_trip(trip: Dictionary, loc: Dictionary) -> void:
 		b.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 		b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 		b.tooltip_text = "%s\nНатисни, щоб зібрати" % GameData.ITEMS[item]["name"]
+		if GatherGame.kind_of(item) != "":
+			b.tooltip_text = "%s\nНатисни, щоб зібрати (акуратно: можна отримати більше або зіпсувати)" % GameData.ITEMS[item]["name"]
 		b.pivot_offset = Vector2.ZERO
 		b.mouse_entered.connect(func(): if not b.disabled: b.modulate = Color(1.35, 1.3, 1.1))
 		b.mouse_exited.connect(func(): if not b.disabled: b.modulate = _rest_color())
@@ -373,6 +382,16 @@ func _layout_nodes() -> void:
 
 func _on_node_pressed(index: int) -> void:
 	var item: String = GameState.trip["nodes"][index]["item"]
+	var node: Dictionary = GameState.trip["nodes"][index]
+	if GatherGame.kind_of(item) != "" and not node.get("timed", false):
+		if not GameState.storage.can_fit(item):
+			_message = "Немає місця: полиці заповнені"
+			refresh()
+			return
+		_gather_index = index
+		_hover = ""
+		_gather.open(item, GameState.trip["location"])
+		return
 	if not GameState.gather(index):
 		_message = "Немає місця: полиці заповнені"
 		refresh()
@@ -384,6 +403,28 @@ func _on_node_pressed(index: int) -> void:
 	tw.tween_property(b, "position:y", b.position.y - b.size.y * 0.8, 0.35)
 	tw.tween_property(b, "modulate:a", 0.0, 0.35)
 	tw.chain().tween_callback(b.hide)
+	refresh()
+
+
+
+## The gathering mini-game is over: the resource flies up into the bag, or fades away if it was spoiled.
+func _on_gather_finished(pieces: int) -> void:
+	var index := _gather_index
+	_gather_index = -1
+	if pieces < 0 or GameState.trip.is_empty() or index < 0 or index >= _buttons.size():
+		refresh()
+		return
+	var got := GameState.gather_result(index, pieces)
+	var b := _buttons[index]
+	b.disabled = true
+	var tw := b.create_tween().set_parallel()
+	if got > 0:
+		tw.tween_property(b, "position:y", b.position.y - b.size.y * 0.8, 0.35)
+	tw.tween_property(b, "modulate:a", 0.0, 0.35)
+	tw.chain().tween_callback(b.hide)
+	_message = "" if pieces == 0 or got >= pieces else "Немає місця для ще одного"
+	if pieces == 0:
+		_message = "Зіпсовано: %s" % GameData.ITEMS[GameState.trip["nodes"][index]["item"]]["name"].to_lower()
 	refresh()
 
 
@@ -472,7 +513,7 @@ func _is_raining() -> bool:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if visible and event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
-		if _fishing.visible:
+		if _fishing.visible or _gather.visible:
 			return
 		if _port_panel.visible:
 			_close_port()

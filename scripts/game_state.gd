@@ -1279,6 +1279,32 @@ func gather(index: int) -> bool:
 	return true
 
 
+## The gathering mini-game for resource "index" ended with "pieces" (gather_game.gd): 0 = spoiled, it is gone;
+## 1 = picked up as usual; 2 = an extra piece on top (if there is room for it). Returns the pieces put in storage.
+func gather_result(index: int, pieces: int) -> int:
+	if trip.is_empty() or index < 0 or index >= trip["nodes"].size():
+		return 0
+	var node: Dictionary = trip["nodes"][index]
+	if node["taken"] or node.get("gone", false):
+		return 0
+	if pieces <= 0:
+		node["gone"] = true
+		changed.emit()
+		return 0
+	if not gather(index):
+		return 0
+	var got := 1
+	for i in pieces - 1:
+		if not storage.add(node["item"]):
+			break
+		trip["found"][node["item"]] = trip["found"].get(node["item"], 0) + 1
+		day_stats["gathered"] += 1
+		got += 1
+	if got > 1:
+		changed.emit()
+	return got
+
+
 ## A timed resource (glowing mushrooms) was not picked up in time and vanished.
 func expire_node(index: int) -> void:
 	if trip.is_empty() or index < 0 or index >= trip["nodes"].size():
